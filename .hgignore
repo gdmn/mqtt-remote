@@ -1,0 +1,8 @@
+syntax: glob
+
+*~
+*.o
+*.swp
+z_*
+mqtt_dev_listener
+mosquitto.h
