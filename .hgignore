@@ -5,4 +5,5 @@ syntax: glob
 *.swp
 z_*
 mqtt_dev_listener
+mqtt_dev_listener_archlinux
 mosquitto.h
