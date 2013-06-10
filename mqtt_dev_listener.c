@@ -22,6 +22,13 @@
 static int run = 1;
 
 struct sigaction act;
+struct read_loop_args {
+	struct mosquitto *mosq;
+	int fd;
+};
+
+pthread_t thread_mosquitto;
+pthread_t thread_read;
 
 void cleanup() {
 	mosquitto_lib_cleanup();
@@ -33,6 +40,9 @@ void sighandler(int signum, siginfo_t *info, void *ptr) {
 	//signal(signum, SIG_IGN);
 	printf("Received signal %d from process %lu\n", signum, (unsigned long)info->si_pid);
 	run = 0;
+	cleanup();
+	pthread_exit(NULL);
+	pthread_cancel(thread_read);
 }
 
 void connect_callback(struct mosquitto *mosq, void *obj, int result) {
@@ -48,7 +58,7 @@ void message_send(struct mosquitto *mosq, char *message) {
 void *mosquitto_loop_thread(void *arg) {
 	struct mosquitto *mosq;
 	mosq = (struct mosquitto *) arg;
-	printf("Loop thread started\n");
+	printf("Mosquitto loop thread started\n");
 	int rc = 0;
 	while (run) {
 		rc = mosquitto_loop(mosq, -1, 1);
@@ -57,8 +67,34 @@ void *mosquitto_loop_thread(void *arg) {
 			mosquitto_reconnect(mosq);
 		}
 	}
-	printf("Loop thread stopped\n");
-	pthread_exit(NULL);
+	printf("Mosquitto loop thread stopped\n");
+	return NULL;
+}
+
+void *read_loop_thread(void *arg) {
+	struct read_loop_args *rla;
+	rla = (struct read_loop_args *) arg;
+	struct mosquitto *mosq = (struct mosquitto *) rla->mosq;
+	int fd = rla->fd;
+	struct stat;
+	struct input_event ev;
+	int rd, size = sizeof (struct input_event);
+
+	printf("Device read loop thread started\n");
+	while (run) {
+		if ((rd = read(fd, &ev, size )) < size) {
+			perror ("read()");
+			run = 0;
+		} else if (ev.type <= 2 && ev.type >= 0 && !(ev.code == 0 && ev.type ==0 && ev.value == 0)) {
+			char str[] = "%i %i %i";
+			char str2[100];
+			sprintf(str2, str, ev.code, ev.type, ev.value);
+			printf("%s\n", str2);
+			message_send(mosq, str2);
+		}
+	}
+	printf("Device read loop thread stopped\n");
+	return NULL;
 }
 
 void show_help_and_exit(char *argv[]) {
@@ -79,9 +115,6 @@ int main(int argc, char *argv[]) {
 	char name[256] = "Unknown";
 	char *device = NULL;
 	char *mqtt_host = NULL;
-	struct stat;
-	struct input_event ev;
-	int rd, size = sizeof (struct input_event);
 
 	if(argc < 3) {
 		show_help_and_exit(argv);
@@ -100,8 +133,10 @@ int main(int argc, char *argv[]) {
 
 	// Open Device
 	device = argv[2];
-	if ((fd = open (device, O_RDONLY)) == -1)
+	if ((fd = open (device, O_RDONLY)) == -1) {
 		printf ("%s is not a vaild device\n", device);
+		exit(-1);
+	}
 
 	// Print Device Name
 	ioctl(fd, EVIOCGNAME (sizeof (name)), name);
@@ -120,24 +155,23 @@ int main(int argc, char *argv[]) {
 		}
 		
 		// Thread init
-		pthread_t thread;
-		rc = pthread_create(&thread, NULL, mosquitto_loop_thread, (void *)mosq);
+		rc = pthread_create(&thread_mosquitto, NULL, mosquitto_loop_thread, (void *)mosq);
 		if (rc) {
 			printf("ERROR; return code from pthread_create() is %d\n", rc);
 			exit(-1);
 		} else {
-			while (run) {
-				if ((rd = read(fd, &ev, size )) < size) {
-					perror ("read()");
-					run = 0;
-				} else if (ev.type <= 2 && ev.type >= 0 && !(ev.code == 0 && ev.type ==0 && ev.value == 0)) {
-					char str[] = "%i %i %i";
-					char str2[100];
-					sprintf(str2, str, ev.code, ev.type, ev.value);
-					printf("%s\n", str2);
-					message_send(mosq, str2);
-				}
+			struct read_loop_args args;
+			args.mosq = mosq;
+			args.fd = fd;
+			rc = pthread_create(&thread_read, NULL, read_loop_thread, &args);
+			if (rc) {
+				printf("ERROR; return code from pthread_create() is %d\n", rc);
+				exit(-1);
 			}
+		}
+
+		while (run) {
+			sleep(20);
 		}
 
 		// Cleanup Mosquitto
